@@ -13,11 +13,11 @@
 #include <HTTPClient.h>       // HTTP Client untuk Check Update
 #include <WiFiClientSecure.h> // Secure Client HTTPS GitHub
 #include <HTTPUpdate.h>       // Auto OTA via URL Direct (.bin)
-#include <ArduinoJson.h>      // Library JSON Parser (Membutuhkan library ArduinoJson)
+#include <ArduinoJson.h>      // Library JSON Parser
 
 // --- VERSI FIRMWARE ---
-#define FIRMWARE_VERSION     "1.0.3"
-#define FIRMWARE_VERSION_CODE 101 // Angka integer untuk komparasi versi
+#define FIRMWARE_VERSION     "1.0.4"
+#define FIRMWARE_VERSION_CODE 104 // Integer komparasi versi
 
 // URL GitHub Raw Konfigurasi Update
 const char* GITHUB_UPDATE_URL = "https://raw.githubusercontent.com/fahrulariza/esp32-weather_station_local/refs/heads/update/update.json";
@@ -35,6 +35,7 @@ String wifiSsid2, wifiPass2;
 String apSsid, apPass;
 String configUser, configPass;
 String ntpServerLocal, ntpServerInet1, ntpServerInet2;
+bool enableRedLed = true; // Konfigurasi On/Off LED Merah
 
 const long  GMT_OFFSET_SEC      = 7 * 3600; // WIB (UTC+7)
 const int   DAYLIGHT_OFFSET_SEC = 0;
@@ -55,6 +56,9 @@ String newBinUrl = "";
 String changelogUrl = "";
 String updateCheckStatusMsg = "";
 
+// Status Mode Flashing / Restarting
+bool isSystemUpdatingOrRebooting = false;
+
 // Global Objects
 WebServer server(80);
 WiFiUDP udpServer;
@@ -71,6 +75,16 @@ bool bmpOk = false;
 bool rtcOk = false;
 bool isApMode = false;
 
+// --- FUNGSI LED BIRU KEDIP CEPAT (FLASHING / REBOOT) ---
+void blinkBlueLedFast(int times = 10, int speedMs = 50) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(LED_BIRU_PIN, LOW);  // NYALA (Active LOW)
+    delay(speedMs);
+    digitalWrite(LED_BIRU_PIN, HIGH); // MATI
+    delay(speedMs);
+  }
+}
+
 // --- FUNGSI LOAD & SAVE NVS PREFERENCES ---
 void loadSettings() {
   preferences.begin("sys_config", true); // Mode Read-only
@@ -86,12 +100,19 @@ void loadSettings() {
   ntpServerLocal = preferences.getString("ntp1", "192.168.23.1");
   ntpServerInet1 = preferences.getString("ntp2", "pool.ntp.org");
   ntpServerInet2 = preferences.getString("ntp3", "time.google.com");
+  enableRedLed   = preferences.getBool("led_red", true);
   preferences.end();
 }
 
 void saveSettingsString(const char* key, String val) {
   preferences.begin("sys_config", false);
   preferences.putString(key, val);
+  preferences.end();
+}
+
+void saveSettingsBool(const char* key, bool val) {
+  preferences.begin("sys_config", false);
+  preferences.putBool(key, val);
   preferences.end();
 }
 
@@ -104,7 +125,7 @@ void checkGitHubUpdate() {
 
   Serial.println("\n🔍 Memeriksa pembaruan firmware dari GitHub...");
   WiFiClientSecure client;
-  client.setInsecure(); // Mengabaikan validasi SSL Certificate untuk HTTPS GitHub
+  client.setInsecure(); // Mengabaikan validasi SSL Certificate
 
   HTTPClient http;
   if (http.begin(client, GITHUB_UPDATE_URL)) {
@@ -114,7 +135,6 @@ void checkGitHubUpdate() {
       Serial.println("[GitHub Update] Respon diterima:");
       Serial.println(payload);
 
-      // Parsing JSON
       DynamicJsonDocument doc(1024);
       DeserializationError error = deserializeJson(doc, payload);
 
@@ -151,29 +171,36 @@ void checkGitHubUpdate() {
 void performOnlineOTA() {
   if (newBinUrl.length() == 0) return;
 
+  isSystemUpdatingOrRebooting = true;
   Serial.println("\n🚀 Memulai proses Flash OTA Online dari URL...");
+  
   WiFiClientSecure client;
-  client.setInsecure(); // Mengabaikan validasi SSL Certificate saat download .bin
+  client.setInsecure();
 
-  // Pengaturan timeout dan penanganan redirect otomatis
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  // Indikator Kedip Cepat Sebelum Flashing
+  blinkBlueLedFast(15, 40);
   
   t_httpUpdate_return ret = httpUpdate.update(client, newBinUrl);
 
   switch (ret) {
     case HTTP_UPDATE_FAILED:
+      isSystemUpdatingOrRebooting = false;
       Serial.printf("❌ HTTP Update Gagal! Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
+      isSystemUpdatingOrRebooting = false;
       Serial.println("⚠ Tidak ada update yang diproses.");
       break;
     case HTTP_UPDATE_OK:
       Serial.println("✅ Update Online Berhasil! Perangkat merestart...");
+      blinkBlueLedFast(20, 30);
       break;
   }
 }
 
-// --- FUNGSI KONEKSI WIFI BERTINGKAT (FAILOVER & AP MODE) ---
+// --- FUNGSI KONEKSI WIFI BERTINGKAT ---
 bool connectWiFiTarget(String ssid, String pass) {
   if (ssid.length() == 0) return false;
 
@@ -216,7 +243,14 @@ void setupNetwork() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apSsid.c_str(), apPass.c_str());
   isApMode = true;
-  digitalWrite(LED_MERAH_PIN, HIGH);
+  
+  // Kontrol LED Merah sesuai setting Preferences
+  if (enableRedLed) {
+    digitalWrite(LED_MERAH_PIN, HIGH);
+  } else {
+    digitalWrite(LED_MERAH_PIN, LOW);
+  }
+  
   Serial.printf("[WiFi AP] Hotspot Aktif: %s | IP AP: %s\n", apSsid.c_str(), WiFi.softAPIP().toString().c_str());
 }
 
@@ -313,7 +347,7 @@ void handleRoot() {
   jsonPayload += "\"firmware_version\":\"" FIRMWARE_VERSION "\",";
   jsonPayload += "\"firmware_version_code\":" + String(FIRMWARE_VERSION_CODE) + ",";
   jsonPayload += "\"update_available\":" + String(isUpdateAvailable ? "true" : "false") + ",";
-  jsonPayload += "\"status\":\"success\",";
+  jsonPayload += "\"status\":\"online\",";
   jsonPayload += "\"datetime\":\"" + String(timeStr) + "\",";
   jsonPayload += "\"epoch_timestamp\":" + String(now.unixtime()) + ",";
   jsonPayload += "\"temperature_aht10\":" + String(t_aht, 1) + ",";
@@ -347,10 +381,42 @@ void handleTimeApi() {
   server.send(200, "application/json", jsonPayload);
 }
 
+// --- ENDPOINT UNTUK AUTO-DETECT REBOOT/PING (/api/ping) ---
+void handlePingApi() {
+  server.send(200, "application/json", "{\"status\":\"ok\",\"version\":\"" FIRMWARE_VERSION "\"}");
+}
+
 // --- LOGOUT HANDLER ---
 void handleLogout() {
   server.sendHeader("WWW-Authenticate", "Basic realm=\"Login Required\"");
   server.send(401, "text/html", "<meta charset='utf-8'><div style='font-family:sans-serif;text-align:center;margin-top:50px;'><h2>Anda telah logout.</h2><p><a href='/config'>Klik di sini untuk login kembali</a></p></div>");
+}
+
+// --- HELPER TEMPLATE HTML REBOOT / UPDATE WAITING ---
+String getRebootWaitingHtmlPage(String title, String statusMsg) {
+  String html = "<!DOCTYPE html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>" + title + "</title>";
+  html += "<style>body{font-family:Segoe UI,sans-serif;background:#f4f4f9;text-align:center;padding:50px 20px;}";
+  html += ".card{background:#fff;padding:30px;border-radius:10px;box-shadow:0 3px 10px rgba(0,0,0,0.1);max-width:420px;margin:auto;}";
+  html += ".spinner{border:5px solid #f3f3f3;border-top:5px solid #007bff;border-radius:50%;width:45px;height:45px;animation:spin 1s linear infinite;margin:20px auto;}";
+  html += "@keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>";
+  html += "</head><body><div class='card'>";
+  html += "<h2>" + title + "</h2>";
+  html += "<p>" + statusMsg + "</p>";
+  html += "<div class='spinner'></div>";
+  html += "<p id='status' style='font-size:13px;color:#666;'>Menunggu perangkat online kembali...</p>";
+  html += "<script>";
+  html += "var checkInterval = setInterval(function(){";
+  html += "  fetch('/api/ping', {method:'GET', cache:'no-store'}).then(function(res){";
+  html += "    if(res.ok){";
+  html += "      clearInterval(checkInterval);";
+  html += "      document.getElementById('status').innerText = 'Perangkat berhasil terhubung! Memuat halaman login...';";
+  html += "      setTimeout(function(){ location.href = '/config'; }, 1500);";
+  html += "    }";
+  html += "  }).catch(function(e){});";
+  html += "}, 2000);";
+  html += "</script></div></body></html>";
+  return html;
 }
 
 // --- HANDLER TRIGGER EXECUTE ONLINE UPDATE ---
@@ -364,7 +430,7 @@ void handleDoOnlineUpdate() {
     return;
   }
 
-  server.send(200, "text/html", "<meta charset='utf-8'><div style='font-family:sans-serif;text-align:center;margin-top:50px;'><h2>Mengunduh & Memasang Firmware Baru...</h2><p>Proses ini membutuhkan waktu sekitar 1-2 menit. Jangan matikan daya ESP32.</p><p>Halaman akan dimuat ulang otomatis dalam 20 detik.</p></div><script>setTimeout(function(){location.href='/config';}, 20000);</script>");
+  server.send(200, "text/html", getRebootWaitingHtmlPage("Proses Online OTA Update", "Sedang mengunduh & menginstal firmware baru... Perangkat akan merestart secara otomatis."));
   
   delay(1000);
   performOnlineOTA();
@@ -379,7 +445,7 @@ void handleConfig() {
   String msg = "";
   bool msgError = false;
 
-  // Handler Tombol Trigger Manual Check Update
+  // Handler Trigger Manual Check Update
   if (server.hasArg("check_update_now")) {
     checkGitHubUpdate();
     msg = updateCheckStatusMsg;
@@ -393,16 +459,27 @@ void handleConfig() {
     msg = "Nama Perangkat berhasil diperbarui!";
   }
 
-  // Submit WiFi Target 1 & 2 & AP Hotspot
+  // Submit WiFi Target 1 & 2 & AP Hotspot & LED Merah
   if (server.hasArg("save_wifi")) {
     wifiSsid1 = server.arg("ssid1"); wifiPass1 = server.arg("wpass1");
     wifiSsid2 = server.arg("ssid2"); wifiPass2 = server.arg("wpass2");
     apSsid    = server.arg("ap_ssid"); apPass   = server.arg("ap_pass");
+    
+    // Simpan Pengaturan LED Merah
+    enableRedLed = server.hasArg("enable_red_led");
+    saveSettingsBool("led_red", enableRedLed);
+
+    // Update Status Fisik Pin LED Merah Saat Ini
+    if (!enableRedLed || !isApMode) {
+      digitalWrite(LED_MERAH_PIN, LOW);
+    } else if (enableRedLed && isApMode) {
+      digitalWrite(LED_MERAH_PIN, HIGH);
+    }
 
     saveSettingsString("ssid1", wifiSsid1);   saveSettingsString("wpass1", wifiPass1);
     saveSettingsString("ssid2", wifiSsid2);   saveSettingsString("wpass2", wifiPass2);
     saveSettingsString("ap_ssid", apSsid);     saveSettingsString("ap_pass", apPass);
-    msg = "Pengaturan Network disimpan! Berlaku setelah ESP32 di-restart.";
+    msg = "Pengaturan Network & LED disimpan!";
   }
 
   // Submit Form NTP
@@ -456,6 +533,7 @@ void handleConfig() {
   html += ".card{background:#fff;padding:22px;border-radius:10px;box-shadow:0 3px 8px rgba(0,0,0,0.12);max-width:480px;margin:auto}";
   html += "h2{color:#007bff;margin-top:0;font-size:22px;} h3{font-size:15px;margin-top:18px;margin-bottom:8px;color:#444;} label{font-weight:600;display:block;margin-top:10px;font-size:13px}";
   html += "input[type=text],input[type=password],input[type=file]{width:100%;padding:9px;margin-top:4px;box-sizing:border-box;border:1px solid #ccc;border-radius:5px;font-size:14px}";
+  html += ".checkbox-container{display:flex;align-items:center;margin-top:12px;font-size:13px;font-weight:600;cursor:pointer;} .checkbox-container input{width:auto;margin-right:8px;}";
   html += "button,.btn{background:#007bff;color:#fff;border:none;padding:10px 15px;margin-top:14px;border-radius:5px;cursor:pointer;width:100%;font-weight:bold;font-size:14px;text-align:center;text-decoration:none;display:inline-block;box-sizing:border-box}";
   html += ".btn-danger{background:#dc3545}.btn-warning{background:#ffc107;color:#000}.btn-success{background:#28a745}.btn-outline{background:none;border:1px solid #007bff;color:#007bff}";
   html += ".ok{color:#28a745;font-weight:bold}.err{color:#dc3545;font-weight:bold}";
@@ -515,6 +593,7 @@ void handleConfig() {
   html += "<tr><td><b>Status Update:</b></td><td>" + String(isUpdateAvailable ? "<span class='err'>Tersedia versi " + newVersionStr + "</span>" : "<span class='ok'>Up to date</span>") + "</td></tr>";
   html += "<tr><td><b>Mode Network:</b></td><td>" + String(isApMode ? "<span class='err'>AP Hotspot Mode</span>" : "<span class='ok'>STA Connected Mode</span>") + "</td></tr>";
   html += "<tr><td><b>IP Address:</b></td><td>" + (isApMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + "</td></tr>";
+  html += "<tr><td><b>LED Merah (Failover):</b></td><td>" + String(enableRedLed ? "<span class='ok'>Aktif</span>" : "<span class='err'>Matikan (Off)</span>") + "</td></tr>";
   html += "<tr><td><b>Sisa RAM (Free Heap):</b></td><td>" + String(freeHeap / 1024.0, 1) + " KB / " + String(totalHeap / 1024.0, 1) + " KB (" + String(heapUsagePct, 1) + "% terpakai)</td></tr>";
   html += "<tr><td><b>Min Free Heap Ever:</b></td><td>" + String(ESP.getMinFreeHeap() / 1024.0, 1) + " KB</td></tr>";
   html += "<tr><td><b>Uptime Perangkat:</b></td><td>" + String(days) + "d " + String(hours) + "h " + String(minutes) + "m " + String(seconds) + "s</td></tr>";
@@ -541,8 +620,8 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Form Pengaturan WiFi 1, WiFi 2, AP Mode
-  html += "<h3>&#128246; Pengaturan Jaringan WiFi</h3>";
+  // Form Pengaturan WiFi 1, WiFi 2, AP Mode & Control LED Merah
+  html += "<h3>&#128246; Pengaturan Jaringan WiFi & Hardware</h3>";
   html += "<form method='POST'>";
   html += "<label><b>WiFi Target 1 (Utama):</b></label>";
   html += "<input type='text' name='ssid1' placeholder='SSID Target 1' value='" + wifiSsid1 + "' required>";
@@ -556,7 +635,12 @@ void handleConfig() {
   html += "<input type='text' name='ap_ssid' placeholder='SSID Hotspot ESP32' value='" + apSsid + "' required>";
   html += "<input type='password' name='ap_pass' placeholder='Password Hotspot (Min 8 karakter)' value='" + apPass + "' required>";
 
-  html += "<button type='submit' name='save_wifi' value='1'>Simpan Semua WiFi</button>";
+  html += "<label class='checkbox-container'>";
+  html += "<input type='checkbox' name='enable_red_led' value='1' " + String(enableRedLed ? "checked" : "") + ">";
+  html += "Aktifkan LED Merah Indikator WiFi Failover";
+  html += "</label>";
+
+  html += "<button type='submit' name='save_wifi' value='1'>Simpan WiFi & Pengaturan LED</button>";
   html += "</form>";
   html += "<hr>";
 
@@ -603,19 +687,28 @@ void handleRestart() {
   if (!server.authenticate(configUser.c_str(), configPass.c_str())) {
     return server.requestAuthentication();
   }
-  server.send(200, "text/html", "<meta charset='utf-8'><h3>Merekali ESP32-C3... Halaman akan dimuat ulang dalam 10 detik.</h3><script>setTimeout(function(){location.href='/config';}, 10000);</script>");
-  delay(1000);
+  
+  isSystemUpdatingOrRebooting = true;
+  server.send(200, "text/html", getRebootWaitingHtmlPage("Merekam Ulang ESP32", "Sedang memproses perintah restart..."));
+  
+  delay(500);
+  blinkBlueLedFast(20, 40);
   ESP.restart();
 }
 
 // --- LOGIKA KONTROL LED INDIKATOR ---
 void updateLEDIndicators() {
-  if (WiFi.status() == WL_CONNECTED && !isApMode) {
-    digitalWrite(LED_MERAH_PIN, LOW); // Mati jika terhubung WiFi
-  } else {
-    digitalWrite(LED_MERAH_PIN, HIGH); // Nyala jika AP Mode / Terputus
+  // Jika sedang update / reboot, abaikan routine biasa
+  if (isSystemUpdatingOrRebooting) return;
+
+  // Kontrol LED Merah
+  if (!enableRedLed || (WiFi.status() == WL_CONNECTED && !isApMode)) {
+    digitalWrite(LED_MERAH_PIN, LOW); // Mati
+  } else if (enableRedLed && isApMode) {
+    digitalWrite(LED_MERAH_PIN, HIGH); // Nyala jika AP Mode & Diizinkan
   }
 
+  // Heartbeat LED Biru
   static unsigned long lastHeartbeat = 0;
   static bool ledState = false;
   static unsigned long ledTurnOnTime = 0;
@@ -640,7 +733,7 @@ void setup() {
 
   pinMode(LED_MERAH_PIN, OUTPUT);
   pinMode(LED_BIRU_PIN, OUTPUT);
-  digitalWrite(LED_MERAH_PIN, HIGH);
+  digitalWrite(LED_MERAH_PIN, LOW);
   digitalWrite(LED_BIRU_PIN, HIGH); // Active LOW -> OFF
 
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -657,14 +750,14 @@ void setup() {
   // Load Pengaturan dari Flash (NVS)
   loadSettings();
 
-  // Koneksi Network Failover (Target 1 -> Target 2 -> Auto AP Mode)
+  // Koneksi Network Failover
   setupNetwork();
 
   if (!isApMode) {
     syncRTCFromNTP();
     lastNTPResync = millis();
 
-    // Jalankan pengecekan update dari GitHub saat pertama kali booted
+    // Jalankan pengecekan update dari GitHub saat booted
     checkGitHubUpdate();
     lastUpdateCheck = millis();
   }
@@ -675,6 +768,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/api/data", handleRoot);
   server.on("/api/time", handleTimeApi);
+  server.on("/api/ping", handlePingApi);
   server.on("/config", handleConfig);
   server.on("/logout", handleLogout);
   server.on("/restart", HTTP_POST, handleRestart);
@@ -686,16 +780,20 @@ void setup() {
       return server.requestAuthentication();
     }
     server.sendHeader("Connection", "close");
-    server.send(200, "text/html", (Update.hasError()) ? "<meta charset='utf-8'><h3>Update Gagal!</h3>" : "<meta charset='utf-8'><h3>Update Sukses! ESP32 Restarting...</h3><script>setTimeout(function(){location.href='/config';}, 10000);</script>");
+    server.send(200, "text/html", getRebootWaitingHtmlPage("Manual OTA Flashing", "Proses pengunggahan firmware selesai! Merestart perangkat..."));
+    
+    blinkBlueLedFast(15, 30);
     ESP.restart();
   }, []() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+      isSystemUpdatingOrRebooting = true;
       Serial.printf("Update Firmware: %s\n", upload.filename.c_str());
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { 
         Update.printError(Serial);
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
+      digitalWrite(LED_BIRU_PIN, !digitalRead(LED_BIRU_PIN)); // Kedip cepat saat penulisan byte flash
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
         Update.printError(Serial);
       }
@@ -717,13 +815,13 @@ void loop() {
   handleNTPServer();
   updateLEDIndicators();
 
-  // Auto-Resync NTP Tiap 12 Jam (hanya dalam STA Mode)
+  // Auto-Resync NTP Tiap 12 Jam
   if (!isApMode && WiFi.status() == WL_CONNECTED && (millis() - lastNTPResync >= RESYNC_INTERVAL_MS)) {
     lastNTPResync = millis();
     syncRTCFromNTP();
   }
 
-  // Auto Check Update GitHub Tiap 6 Jam (hanya dalam STA Mode)
+  // Auto Check Update GitHub Tiap 6 Jam
   if (!isApMode && WiFi.status() == WL_CONNECTED && (millis() - lastUpdateCheck >= CHECK_UPDATE_INTERVAL_MS)) {
     lastUpdateCheck = millis();
     checkGitHubUpdate();
