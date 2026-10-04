@@ -16,8 +16,8 @@
 #include <ArduinoJson.h>      // Library JSON Parser
 
 // --- VERSI FIRMWARE ---
-#define FIRMWARE_VERSION     "1.0.5"
-#define FIRMWARE_VERSION_CODE 105 // Integer komparasi versi
+#define FIRMWARE_VERSION     "1.0.6"
+#define FIRMWARE_VERSION_CODE 106 // Integer komparasi versi
 
 // URL GitHub Raw Konfigurasi Update
 const char* GITHUB_UPDATE_URL = "https://raw.githubusercontent.com/fahrulariza/esp32-weather_station_local/refs/heads/update/update.json";
@@ -56,7 +56,7 @@ String newBinUrl = "";
 String changelogUrl = "";
 String updateCheckStatusMsg = "";
 
-// Status Error Update Rinci untuk Web UI (v1.0.5)
+// Status Error Update Rinci untuk Web UI
 String lastUpdateError = "";
 
 // Status Mode Flashing / Restarting
@@ -78,17 +78,42 @@ bool bmpOk = false;
 bool rtcOk = false;
 bool isApMode = false;
 
-// --- FUNGSI LED BIRU KEDIP CEPAT (FLASHING / REBOOT) ---
+// --- HELPER KEDIPAN KONEKSI/TRANSAKSI DATA LED BIRU ---
+inline void ledBiruOn() {
+  digitalWrite(LED_BIRU_PIN, LOW); // Active LOW -> NYALA
+}
+
+inline void ledBiruOff() {
+  digitalWrite(LED_BIRU_PIN, HIGH); // Active LOW -> MATI
+}
+
+// Fungsi kedip cepat saat flashing/reboot
 void blinkBlueLedFast(int times = 10, int speedMs = 50) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(LED_BIRU_PIN, LOW);  // NYALA (Active LOW)
+    ledBiruOn();
     delay(speedMs);
-    digitalWrite(LED_BIRU_PIN, HIGH); // MATI
+    ledBiruOff();
     delay(speedMs);
   }
 }
 
-// --- FUNGSI PENERJEMAH ERROR OTA UNTUK USER (v1.0.5) ---
+// MACRO / HELPER UNTUK INDIKASI AKTIVITAS DATA TRANSMISI
+class DataActivityPulse {
+public:
+  DataActivityPulse() {
+    if (!isSystemUpdatingOrRebooting) {
+      ledBiruOn(); // Nyalakan LED saat data mulai diproses/dikirim
+    }
+  }
+  ~DataActivityPulse() {
+    if (!isSystemUpdatingOrRebooting) {
+      delay(15);   // Beri jeda minim 15ms agar kedipan terlihat jelas oleh mata
+      ledBiruOff(); // Matikan LED setelah respon selesai dikirim
+    }
+  }
+};
+
+// --- FUNGSI PENERJEMAH ERROR OTA UNTUK USER ---
 String getOTAErrorMessage(int httpErrCode, uint8_t updateErrCode = 0) {
   if (updateErrCode > 0) {
     switch (updateErrCode) {
@@ -149,7 +174,7 @@ String getOTAErrorMessage(int httpErrCode, uint8_t updateErrCode = 0) {
 
 // --- FUNGSI LOAD & SAVE NVS PREFERENCES ---
 void loadSettings() {
-  preferences.begin("sys_config", true); // Mode Read-only
+  preferences.begin("sys_config", true);
   deviceName     = preferences.getString("dev_name", "ESP32-Suhu-Jam");
   wifiSsid1      = preferences.getString("ssid1", "Home-Firewall");
   wifiPass1      = preferences.getString("wpass1", "AkuTergodA1");
@@ -185,18 +210,17 @@ void checkGitHubUpdate() {
     return;
   }
 
+  DataActivityPulse activity; // Kedipkan LED Biru saat unduh JSON GitHub
+
   Serial.println("\n🔍 Memeriksa pembaruan firmware dari GitHub...");
   WiFiClientSecure client;
-  client.setInsecure(); // Mengabaikan validasi SSL Certificate
+  client.setInsecure();
 
   HTTPClient http;
   if (http.begin(client, GITHUB_UPDATE_URL)) {
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();
-      Serial.println("[GitHub Update] Respon diterima:");
-      Serial.println(payload);
-
       DynamicJsonDocument doc(1024);
       DeserializationError error = deserializeJson(doc, payload);
 
@@ -209,19 +233,15 @@ void checkGitHubUpdate() {
         if (newVersionCode > FIRMWARE_VERSION_CODE) {
           isUpdateAvailable = true;
           updateCheckStatusMsg = "Versi baru ditemukan: " + newVersionStr;
-          Serial.printf("🚀 Versi baru tersedia: %s (Code: %d)\n", newVersionStr.c_str(), newVersionCode);
         } else {
           isUpdateAvailable = false;
           updateCheckStatusMsg = "Firmware sudah menggunakan versi terbaru (v" FIRMWARE_VERSION ").";
-          Serial.println("✅ Firmware saat ini sudah yang terbaru.");
         }
       } else {
         updateCheckStatusMsg = "Gagal memproses data JSON dari GitHub.";
-        Serial.println("⚠ JSON Parsing Failed!");
       }
     } else {
       updateCheckStatusMsg = "Gagal terhubung ke GitHub. HTTP Code: " + String(httpCode);
-      Serial.printf("⚠ HTTP GET Gagal, Error: %s\n", http.errorToString(httpCode).c_str());
     }
     http.end();
   } else {
@@ -234,15 +254,13 @@ void performOnlineOTA() {
   if (newBinUrl.length() == 0) return;
 
   isSystemUpdatingOrRebooting = true;
-  lastUpdateError = ""; // Reset status error
+  lastUpdateError = "";
   Serial.println("\n🚀 Memulai proses Flash OTA Online dari URL...");
   
   WiFiClientSecure client;
   client.setInsecure();
-
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  // Indikator Kedip Cepat Sebelum Flashing
   blinkBlueLedFast(15, 40);
   
   t_httpUpdate_return ret = httpUpdate.update(client, newBinUrl);
@@ -251,16 +269,13 @@ void performOnlineOTA() {
     case HTTP_UPDATE_FAILED:
       isSystemUpdatingOrRebooting = false;
       lastUpdateError = getOTAErrorMessage(httpUpdate.getLastError());
-      Serial.printf("❌ HTTP Update Gagal! Code (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
       isSystemUpdatingOrRebooting = false;
       lastUpdateError = "Tidak ada file pembaruan yang diproses oleh server.";
-      Serial.println("⚠ Tidak ada update yang diproses.");
       break;
     case HTTP_UPDATE_OK:
       lastUpdateError = "";
-      Serial.println("✅ Update Online Berhasil! Perangkat merestart...");
       blinkBlueLedFast(20, 30);
       break;
   }
@@ -276,19 +291,14 @@ bool connectWiFiTarget(String ssid, String pass) {
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   for (int attempt = 1; attempt <= 4; attempt++) {
-    Serial.printf("[WiFi] Percobaan ke-%d (Menunggu 30 detik)...\n", attempt);
-    
     unsigned long startWait = millis();
     while (millis() - startWait < 30000) {
       if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WiFi] SUKSES Terhubung ke %s! IP: %s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
         return true;
       }
       delay(500);
     }
   }
-  
-  Serial.printf("[WiFi] Gagal terhubung ke %s setelah 2 menit.\n", ssid.c_str());
   return false;
 }
 
@@ -305,26 +315,22 @@ void setupNetwork() {
     return;
   }
 
-  Serial.println("\n[WiFi] WiFi 1 & 2 Gagal. Mengaktifkan Access Point Mode...");
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apSsid.c_str(), apPass.c_str());
   isApMode = true;
   
-  // Kontrol LED Merah sesuai setting Preferences
   if (enableRedLed) {
     digitalWrite(LED_MERAH_PIN, HIGH);
   } else {
     digitalWrite(LED_MERAH_PIN, LOW);
   }
-  
-  Serial.printf("[WiFi AP] Hotspot Aktif: %s | IP AP: %s\n", apSsid.c_str(), WiFi.softAPIP().toString().c_str());
 }
 
 // --- FUNGSI UPDATE RTC DARI NTP SERVER ---
 void syncRTCFromNTP() {
   if (isApMode) return;
+  DataActivityPulse activity; // Kedipkan LED Biru saat sync NTP Internet
 
-  Serial.println("\n🔄 Sync waktu dari NTP Server...");
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, ntpServerLocal.c_str(), ntpServerInet1.c_str(), ntpServerInet2.c_str());
 
   struct tm timeinfo;
@@ -340,10 +346,7 @@ void syncRTCFromNTP() {
 
     if (rtcOk) {
       rtc.adjust(DateTime(ntpSecs));
-      Serial.println("✅ Sync RTC dari NTP Berhasil!");
     }
-  } else {
-    Serial.println("⚠ Gagal mengambil waktu dari NTP!");
   }
 }
 
@@ -351,6 +354,8 @@ void syncRTCFromNTP() {
 void handleNTPServer() {
   int packetSize = udpServer.parsePacket();
   if (packetSize >= 48) {
+    DataActivityPulse activity; // Kedipkan LED Biru saat merespon NTP Lokal
+
     byte requestBuffer[48];
     udpServer.read(requestBuffer, 48);
 
@@ -387,6 +392,8 @@ void handleNTPServer() {
 
 // --- REST API ENDPOINT UTAMA (/) ---
 void handleRoot() {
+  DataActivityPulse activity; // Kedip LED Biru saat memproses API Suhu/Waktu
+
   sensors_event_t humidity, temp_aht;
   float t_aht = 0, hum = 0, t_bmp = 0, pres = 0, alt = 0;
 
@@ -428,6 +435,8 @@ void handleRoot() {
 
 // --- REST API ENDPOINT TIME (/api/time) ---
 void handleTimeApi() {
+  DataActivityPulse activity;
+
   DateTime now = rtcOk ? rtc.now() : DateTime(0UL);
   char timeStr[25];
   snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d", 
@@ -449,11 +458,13 @@ void handleTimeApi() {
 
 // --- ENDPOINT UNTUK AUTO-DETECT REBOOT/PING (/api/ping) ---
 void handlePingApi() {
+  DataActivityPulse activity;
   server.send(200, "application/json", "{\"status\":\"ok\",\"version\":\"" FIRMWARE_VERSION "\"}");
 }
 
 // --- LOGOUT HANDLER ---
 void handleLogout() {
+  DataActivityPulse activity;
   server.sendHeader("WWW-Authenticate", "Basic realm=\"Login Required\"");
   server.send(401, "text/html", "<meta charset='utf-8'><div style='font-family:sans-serif;text-align:center;margin-top:50px;'><h2>Anda telah logout.</h2><p><a href='/config'>Klik di sini untuk login kembali</a></p></div>");
 }
@@ -508,6 +519,8 @@ void handleConfig() {
     return server.requestAuthentication();
   }
 
+  DataActivityPulse activity; // Kedipkan LED Biru saat memproses request Web Config
+
   String msg = "";
   bool msgError = false;
 
@@ -531,11 +544,9 @@ void handleConfig() {
     wifiSsid2 = server.arg("ssid2"); wifiPass2 = server.arg("wpass2");
     apSsid    = server.arg("ap_ssid"); apPass   = server.arg("ap_pass");
     
-    // Simpan Pengaturan LED Merah
     enableRedLed = server.hasArg("enable_red_led");
     saveSettingsBool("led_red", enableRedLed);
 
-    // Update Status Fisik Pin LED Merah Saat Ini
     if (!enableRedLed || !isApMode) {
       digitalWrite(LED_MERAH_PIN, LOW);
     } else if (enableRedLed && isApMode) {
@@ -609,7 +620,6 @@ void handleConfig() {
   html += ".alert-info{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb}";
   html += ".info-table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}.info-table td{padding:5px 0;border-bottom:1px solid #eee}</style>";
   
-  // Script Auto Logout 2 Menit
   html += "<script>";
   html += "var timeout;";
   html += "function autoLogout(){";
@@ -633,7 +643,6 @@ void handleConfig() {
   html += "<div class='card'>";
   html += "<div style='display:flex;justify-content:space-between;align-items:center;'><h2>&#9881;&#65039; Config</h2><button onclick='fetch(\"/logout\").then(function(){location.href=\"/config\";});' style='margin:0;padding:6px 12px;width:auto;' class='btn btn-warning'>Logout</button></div>";
 
-  // WIDGET ALERT NOTIFIKASI JIKA PROSES UPDATE GAGAL (v1.0.5)
   if (lastUpdateError.length() > 0) {
     html += "<div class='alert alert-danger' style='margin-top:15px;'>";
     html += "⚠️ <b>Gagal Memasang Firmware!</b><br>";
@@ -646,7 +655,6 @@ void handleConfig() {
     html += "<div class='alert " + String(msgError ? "alert-danger" : "alert-success") + "' style='margin-top:15px;'>" + msg + "</div>";
   }
 
-  // WIDGET ALERT NOTIFIKASI PENGATURAN UPDATE GITHUB
   if (isUpdateAvailable) {
     html += "<div class='alert alert-success' style='margin-top:15px;'>";
     html += "🚀 <b>Pembaruan Firmware Ditemukan!</b><br>";
@@ -660,7 +668,6 @@ void handleConfig() {
     html += "</div>";
   }
 
-  // Informasi Memori & Sistem
   html += "<h3>&#128187; Informasi Sistem & Memori</h3>";
   html += "<table class='info-table'>";
   html += "<tr><td><b>Nama Device:</b></td><td>" + deviceName + "</td></tr>";
@@ -675,19 +682,16 @@ void handleConfig() {
   html += "<tr><td><b>Frekuensi CPU / Flash:</b></td><td>" + String(ESP.getCpuFreqMHz()) + " MHz / " + String(ESP.getFlashChipSize() / (1024 * 1024)) + " MB</td></tr>";
   html += "</table>";
 
-  // Button Pemicu Cek Update Manual
   html += "<form method='POST'>";
   html += "<button type='submit' name='check_update_now' value='1' class='btn btn-outline'>&#128260; Cek Update Baru dari GitHub</button>";
   html += "</form>";
   
-  // Status Hardware
   html += "<h3>&#128268; Status Hardware</h3>";
   html += "<p style='font-size:13px;margin:3px 0;'>AHT10 Sensor: " + String(ahtOk ? "<span class='ok'>[ONLINE]</span>" : "<span class='err'>[OFFLINE]</span>") + "</p>";
   html += "<p style='font-size:13px;margin:3px 0;'>GY-68 (BMP180): " + String(bmpOk ? "<span class='ok'>[ONLINE]</span>" : "<span class='err'>[OFFLINE]</span>") + "</p>";
   html += "<p style='font-size:13px;margin:3px 0;'>DS1307 RTC: " + String(rtcOk ? "<span class='ok'>[ONLINE]</span>" : "<span class='err'>[OFFLINE]</span>") + "</p>";
   html += "<hr>";
 
-  // Form Device Name
   html += "<h3>&#127991;&#65039; Nama Perangkat (Device Hostname)</h3>";
   html += "<form method='POST'>";
   html += "<label>Device Hostname:</label><input type='text' name='dev_name' value='" + deviceName + "' required>";
@@ -695,7 +699,6 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Form Pengaturan WiFi 1, WiFi 2, AP Mode & Control LED Merah
   html += "<h3>&#128246; Pengaturan Jaringan WiFi & Hardware</h3>";
   html += "<form method='POST'>";
   html += "<label><b>WiFi Target 1 (Utama):</b></label>";
@@ -719,7 +722,6 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Form Edit NTP
   html += "<h3>&#128336; Pengaturan Server NTP</h3>";
   html += "<form method='POST'>";
   html += "<label>NTP Utama (Lokal):</label><input type='text' name='ntp1' value='" + ntpServerLocal + "'>";
@@ -729,7 +731,6 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Form Ubah User & Password Config
   html += "<h3>&#128274; Ubah Kredensial Login Web UI</h3>";
   html += "<form method='POST'>";
   html += "<label>User Baru:</label><input type='text' name='new_user' value='" + configUser + "' required>";
@@ -739,7 +740,6 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Form Manual OTA Upload File (.bin)
   html += "<h3>&#128230; Manual Firmware Update (File .bin)</h3>";
   html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
   html += "<input type='file' name='update' accept='.bin' required>";
@@ -747,7 +747,6 @@ void handleConfig() {
   html += "</form>";
   html += "<hr>";
 
-  // Action Restart
   html += "<form method='POST' action='/restart'>";
   html += "<button type='submit' class='btn btn-danger' onclick='return confirm(\"Restart ESP32?\")'>Restart ESP32</button>";
   html += "</form>";
@@ -773,17 +772,16 @@ void handleRestart() {
 
 // --- LOGIKA KONTROL LED INDIKATOR ---
 void updateLEDIndicators() {
-  // Jika sedang update / reboot, abaikan routine biasa
   if (isSystemUpdatingOrRebooting) return;
 
-  // Kontrol LED Merah
+  // Kontrol LED Merah Failover
   if (!enableRedLed || (WiFi.status() == WL_CONNECTED && !isApMode)) {
-    digitalWrite(LED_MERAH_PIN, LOW); // Mati
+    digitalWrite(LED_MERAH_PIN, LOW);
   } else if (enableRedLed && isApMode) {
-    digitalWrite(LED_MERAH_PIN, HIGH); // Nyala jika AP Mode & Diizinkan
+    digitalWrite(LED_MERAH_PIN, HIGH);
   }
 
-  // Heartbeat LED Biru
+  // Heartbeat LED Biru (5 Detik Sekali saat Idle)
   static unsigned long lastHeartbeat = 0;
   static bool ledState = false;
   static unsigned long ledTurnOnTime = 0;
@@ -792,13 +790,13 @@ void updateLEDIndicators() {
   if (!ledState && (currentMillis - lastHeartbeat >= 5000)) {
     lastHeartbeat = currentMillis;
     ledState = true;
-    digitalWrite(LED_BIRU_PIN, LOW); // Active LOW -> NYALA
+    ledBiruOn();
     ledTurnOnTime = currentMillis;
   }
 
   if (ledState && (currentMillis - ledTurnOnTime >= 100)) {
     ledState = false;
-    digitalWrite(LED_BIRU_PIN, HIGH); // Active LOW -> MATI
+    ledBiruOff();
   }
 }
 
@@ -809,11 +807,10 @@ void setup() {
   pinMode(LED_MERAH_PIN, OUTPUT);
   pinMode(LED_BIRU_PIN, OUTPUT);
   digitalWrite(LED_MERAH_PIN, LOW);
-  digitalWrite(LED_BIRU_PIN, HIGH); // Active LOW -> OFF
+  ledBiruOff();
 
   Wire.begin(SDA_PIN, SCL_PIN);
 
-  // Cek Hardware Sensor & RTC
   ahtOk = aht.begin(&Wire);
   bmpOk = bmp.begin(BMP085_ULTRAHIGHRES, &Wire);
   rtcOk = rtc.begin(&Wire);
@@ -822,24 +819,19 @@ void setup() {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
-  // Load Pengaturan dari Flash (NVS)
   loadSettings();
-
-  // Koneksi Network Failover
   setupNetwork();
 
   if (!isApMode) {
     syncRTCFromNTP();
     lastNTPResync = millis();
 
-    // Jalankan pengecekan update dari GitHub saat booted
     checkGitHubUpdate();
     lastUpdateCheck = millis();
   }
 
   udpServer.begin(NTP_PORT);
 
-  // Endpoint Routing
   server.on("/", handleRoot);
   server.on("/api/data", handleRoot);
   server.on("/api/time", handleTimeApi);
@@ -862,7 +854,7 @@ void setup() {
       return;
     }
 
-    lastUpdateError = ""; // Clear error
+    lastUpdateError = "";
     server.sendHeader("Connection", "close");
     server.send(200, "text/html", getRebootWaitingHtmlPage("Manual OTA Flashing", "Proses pengunggahan firmware selesai! Merestart perangkat..."));
     
@@ -873,22 +865,19 @@ void setup() {
     if (upload.status == UPLOAD_FILE_START) {
       isSystemUpdatingOrRebooting = true;
       lastUpdateError = "";
-      Serial.printf("Update Firmware: %s\n", upload.filename.c_str());
+      ledBiruOn();
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { 
-        Update.printError(Serial);
         lastUpdateError = getOTAErrorMessage(0, Update.getError());
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
-      digitalWrite(LED_BIRU_PIN, !digitalRead(LED_BIRU_PIN)); // Kedip cepat saat penulisan byte flash
+      // Toggle LED cepat setiap chunk byte firmware ditulis ke flash
+      digitalWrite(LED_BIRU_PIN, !digitalRead(LED_BIRU_PIN)); 
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
         lastUpdateError = getOTAErrorMessage(0, Update.getError());
       }
     } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) {
-        Serial.printf("Update Selesai: %u Byte\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
+      ledBiruOff();
+      if (!Update.end(true)) {
         lastUpdateError = getOTAErrorMessage(0, Update.getError());
       }
     }
@@ -903,13 +892,11 @@ void loop() {
   handleNTPServer();
   updateLEDIndicators();
 
-  // Auto-Resync NTP Tiap 12 Jam
   if (!isApMode && WiFi.status() == WL_CONNECTED && (millis() - lastNTPResync >= RESYNC_INTERVAL_MS)) {
     lastNTPResync = millis();
     syncRTCFromNTP();
   }
 
-  // Auto Check Update GitHub Tiap 6 Jam
   if (!isApMode && WiFi.status() == WL_CONNECTED && (millis() - lastUpdateCheck >= CHECK_UPDATE_INTERVAL_MS)) {
     lastUpdateCheck = millis();
     checkGitHubUpdate();
