@@ -1,6 +1,6 @@
 {
-  "version": "v1.1.1",
-  "versionCode": 111,
+  "version": "v1.0.2",
+  "versionCode": 102,
   "zipUrl": "https://github.com/fahrulariza/GooglePhoto/releases/download/10.4/GPhotos.Unlimited.10.4.zip",
   "changelog": "https://raw.githubusercontent.com/fahrulariza/esp32-weather_station_local/update/build.md"
 }
