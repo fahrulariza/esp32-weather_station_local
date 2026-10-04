@@ -16,7 +16,7 @@
 #include <ArduinoJson.h>      // Library JSON Parser (Membutuhkan library ArduinoJson)
 
 // --- VERSI FIRMWARE ---
-#define FIRMWARE_VERSION     "1.0.2"
+#define FIRMWARE_VERSION     "1.0.3"
 #define FIRMWARE_VERSION_CODE 101 // Angka integer untuk komparasi versi
 
 // URL GitHub Raw Konfigurasi Update
