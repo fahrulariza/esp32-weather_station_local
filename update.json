@@ -1,6 +1,6 @@
 {
-  "version": "v1.0.4",
-  "versionCode": 104,
-  "zipUrl": "https://github.com/fahrulariza/esp32-weather_station_local/releases/download/1.0.4a/esp32-C3-weather_station_local.bin",
+  "version": "v1.0.5",
+  "versionCode": 105,
+  "zipUrl": "https://github.com/fahrulariza/esp32-weather_station_local/releases/download/1.0.5/esp32-C3-weather_station_local.bin",
   "changelog": "https://raw.githubusercontent.com/fahrulariza/esp32-weather_station_local/refs/heads/master/README.md"
 }
