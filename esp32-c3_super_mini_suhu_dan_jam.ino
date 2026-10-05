@@ -410,6 +410,16 @@ void handleRoot() {
     alt = 44330.0 * (1.0 - pow(p_pa / 101325.0, 0.1902949));
   }
 
+  // --- LOGIKA PERHITUNGAN RATA-RATA SUHU (FAILSAFE) ---
+  float t_avg = 0.0;
+  if (ahtOk && bmpOk) {
+    t_avg = (t_aht + t_bmp) / 2.0; // Rata-rata jika kedua sensor aktif
+  } else if (ahtOk) {
+    t_avg = t_aht;                 // Fallback hanya ke AHT10 jika BMP offline
+  } else if (bmpOk) {
+    t_avg = t_bmp;                 // Fallback hanya ke BMP180 jika AHT offline
+  }
+
   DateTime now = rtcOk ? rtc.now() : DateTime(0UL);
   char timeStr[25];
   snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d", 
@@ -423,6 +433,7 @@ void handleRoot() {
   jsonPayload += "\"status\":\"online\",";
   jsonPayload += "\"datetime\":\"" + String(timeStr) + "\",";
   jsonPayload += "\"epoch_timestamp\":" + String(now.unixtime()) + ",";
+  jsonPayload += "\"temperature\":" + String(t_avg, 1) + ","; // Rata-rata suhu
   jsonPayload += "\"temperature_aht10\":" + String(t_aht, 1) + ",";
   jsonPayload += "\"humidity\":" + String(hum, 1) + ",";
   jsonPayload += "\"temperature_gy68\":" + String(t_bmp, 1) + ",";
